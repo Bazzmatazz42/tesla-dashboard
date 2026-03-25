@@ -1,142 +1,127 @@
 """
 Tesla Segment Revenue & COGS Extractor
-Parses 10-Q and 10-K HTML filings to extract quarterly revenue and COGS
-broken down by segment: Automotive, Energy, Services.
+Parses ALL 10-Q and 10-K HTML filings from 2010 to present.
 
-Writes to tesla-dashboard/data.js  (updates window.TSLA.segments array)
+Three historical eras:
+  2010-2014: "Automotive sales" + "Development services"
+  2015-2016: "Automotive" + "Services and other" (no energy line yet)
+  2017+:     Full modern breakdown (auto sales/leasing/credits, energy, services)
+
+Q4 is derived: FY (from 10-K col 1) minus 9M YTD (from Q3 10-Q col 3).
+
+Writes to tesla-dashboard/data.js (updates window.TSLA.segments array).
 """
 
 import re
 import json
 from pathlib import Path
 from bs4 import BeautifulSoup
-from datetime import date
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR  = Path(__file__).parent
 FILINGS_DIR = SCRIPT_DIR.parent / "company_docs" / "sec_filings"
-DATA_JS    = SCRIPT_DIR.parent / "data.js"
+DATA_JS     = SCRIPT_DIR.parent / "data.js"
 
-# ── Quarter mapping ───────────────────────────────────────────────────────────
+# ── Quarter mapping ────────────────────────────────────────────────────────────
 
 def filename_to_quarter(fname: str) -> tuple[str, str] | None:
-    """
-    Returns (quarter_label, period_end) from filename.
-    e.g. TSLA-10-Q-2025-07-24.htm → ('Q2-2025', '2025-06-30')
-         TSLA-10-K-2024.htm        → ('FY-2024', '2024-12-31')
-    """
     fname = fname.lower()
 
-    # 10-Q: TSLA-10-Q-YYYY-MM-DD.htm
+    # 10-Q: TSLA-10-Q-YYYY-MM-DD.htm  →  filing month determines quarter
     m = re.match(r"tsla-10-q-(\d{4})-(\d{2})-\d{2}", fname)
     if m:
         y, mo = int(m.group(1)), int(m.group(2))
-        # Filing month → quarter end
-        # Q1 ends Mar 31, filed Apr-May; Q2 ends Jun 30, filed Jul-Aug; Q3 ends Sep 30, filed Oct-Nov
-        if mo in (4, 5):
-            return f"Q1-{y}", f"{y}-03-31"
-        elif mo in (7, 8):
-            return f"Q2-{y}", f"{y}-06-30"
-        elif mo in (10, 11):
-            return f"Q3-{y}", f"{y}-09-30"
-        # Some early filings have unusual months
+        if mo in (4, 5):   return f"Q1-{y}", f"{y}-03-31"
+        if mo in (7, 8):   return f"Q2-{y}", f"{y}-06-30"
+        if mo in (10, 11): return f"Q3-{y}", f"{y}-09-30"
         return None
 
-    # 10-K: TSLA-10-K-YYYY.htm
-    # Filename year = filing year (filed Jan/Feb YYYY for fiscal year YYYY-1)
+    # 10-K: TSLA-10-K-YYYY.htm  →  filename year = filing year, FY = year - 1
     # e.g. TSLA-10-K-2025.htm filed Feb 2025 → covers FY2024
     m = re.match(r"tsla-10-k-(\d{4})", fname)
     if m:
-        filing_year = int(m.group(1))
-        fy = filing_year - 1  # fiscal year is one behind filing year
+        fy = int(m.group(1)) - 1
         return f"FY-{fy}", f"{fy}-12-31"
 
     return None
 
-# ── Table parser ──────────────────────────────────────────────────────────────
+# ── Unit detection ─────────────────────────────────────────────────────────────
 
 def detect_unit_multiplier(soup: BeautifulSoup) -> int:
-    """Return 1000 if filing is in thousands, 1_000_000 if in millions."""
+    """Returns 1_000_000 (millions) or 1_000 (thousands)."""
     text = soup.get_text(" ")
-    # Check for explicit accounting labels — must be a standalone 'in' (word boundary)
-    # to avoid matching "contain thousands" / "contain millions"
+    # Use \b to avoid matching "contain millions / thousands of parts"
     if re.search(r"\bin\s+millions", text, re.I):
         return 1_000_000
     if re.search(r"\bin\s+thousands", text, re.I):
         return 1_000
-    return 1_000_000  # default for modern filings
+    return 1_000_000
+
+# ── Income statement parser ────────────────────────────────────────────────────
+
+# Revenue-only keys: skip if we're in the COGS section
+_REV_ONLY  = {"automotive_sales_rev", "_auto_era_rev", "_dev_svc_rev"}
+# COGS-only keys: skip if we're NOT in the COGS section
+_COGS_ONLY = {"automotive_sales_cogs", "energy_cogs", "services_cogs",
+              "_auto_era_cogs", "_dev_svc_cogs"}
+
+TARGET_ROWS = {
+    # ── Revenue (modern 2017+) ────────────────────────────────────────────────
+    "automotive_sales_rev":   re.compile(r"automotive\s+sales", re.I),
+    "automotive_credits_rev": re.compile(r"automotive\s+regulatory\s+credits", re.I),
+    "automotive_leasing_rev": re.compile(r"automotive\s+leasing", re.I),
+    "total_automotive_rev":   re.compile(r"total\s+automotive\s+revenues?", re.I),
+    "energy_rev":             re.compile(r"energy\s+generation\s+and\s+storage", re.I),
+    "services_rev":           re.compile(r"services\s+and\s+other", re.I),
+    "total_revenues":         re.compile(r"^total\s+revenues?$", re.I),
+    # ── Revenue (era aliases) ─────────────────────────────────────────────────
+    "_auto_era_rev":          re.compile(r"^automotive$", re.I),             # 2015-2016
+    "_dev_svc_rev":           re.compile(r"^development\s+services$", re.I), # 2010-2014
+    # ── COGS (modern 2017+) ───────────────────────────────────────────────────
+    "automotive_sales_cogs":  re.compile(r"automotive\s+sales$", re.I),
+    "total_automotive_cogs":  re.compile(r"total\s+automotive\s+cost", re.I),
+    "energy_cogs":            re.compile(r"energy\s+generation\s+and\s+storage$", re.I),
+    "services_cogs":          re.compile(r"services\s+and\s+other$", re.I),
+    "total_cogs":             re.compile(r"total\s+cost\s+of\s+revenues?", re.I),
+    # ── COGS (era aliases) ────────────────────────────────────────────────────
+    "_auto_era_cogs":         re.compile(r"^automotive$", re.I),             # 2015-2016
+    "_dev_svc_cogs":          re.compile(r"^development\s+services$", re.I), # 2010-2014
+    # ── P&L ──────────────────────────────────────────────────────────────────
+    "gross_profit":           re.compile(r"^(?:total\s+)?gross\s+profit(?:\s*\(loss\))?$", re.I),
+    "r_and_d":                re.compile(r"research\s+and\s+development", re.I),
+    "sga":                    re.compile(r"selling,?\s+general\s+and\s+admin", re.I),
+    "op_income":              re.compile(r"(?:income|loss)\s+from\s+operations", re.I),
+    "net_income":             re.compile(r"net\s+(?:income|loss)\s+attributable\s+to\s+common", re.I),
+}
 
 
-def parse_income_statement(soup: BeautifulSoup, quarter_label: str, target_col: int = 1) -> dict | None:
+def parse_income_statement(soup: BeautifulSoup, target_col: int = 1) -> dict | None:
     """
-    Finds the consolidated statements of operations / income statement table.
-    Returns dict with segment revenue and COGS, or None if not found.
+    Finds the full income statement table (must have revenues AND cost of revenues).
+    target_col: 1 = first data column (Q standalone / FY current)
+                3 = Nine Months YTD (Q3 10-Q only)
+    Returns a raw dict of matched fields, or None if table not found.
     """
-
-    # Target rows by label
-    TARGET_ROWS = {
-        # Revenue
-        "automotive_sales_rev":        re.compile(r"automotive\s+sales", re.I),
-        "automotive_credits_rev":      re.compile(r"automotive\s+regulatory\s+credits", re.I),
-        "automotive_leasing_rev":      re.compile(r"automotive\s+leasing", re.I),
-        "total_automotive_rev":        re.compile(r"total\s+automotive\s+revenues?", re.I),
-        "energy_rev":                  re.compile(r"energy\s+generation\s+and\s+storage", re.I),
-        "services_rev":                re.compile(r"services\s+and\s+other", re.I),
-        "total_revenues":              re.compile(r"^total\s+revenues?$", re.I),
-        # COGS
-        "automotive_sales_cogs":       re.compile(r"automotive\s+sales$", re.I),   # in COGS section
-        "total_automotive_cogs":       re.compile(r"total\s+automotive\s+cost", re.I),
-        "energy_cogs":                 re.compile(r"energy\s+generation\s+and\s+storage$", re.I),
-        "services_cogs":               re.compile(r"services\s+and\s+other$", re.I),
-        "total_cogs":                  re.compile(r"total\s+cost\s+of\s+revenues?", re.I),
-        # Below the line
-        "gross_profit":                re.compile(r"^(?:total\s+)?gross\s+profit$", re.I),
-        "r_and_d":                     re.compile(r"research\s+and\s+development", re.I),
-        "sga":                         re.compile(r"selling,?\s+general\s+and\s+admin", re.I),
-        "op_income":                   re.compile(r"income\s+from\s+operations", re.I),
-        "net_income":                  re.compile(r"net\s+income\s+attributable\s+to\s+common", re.I),
-        "eps_diluted":                 re.compile(r"diluted$", re.I),
-    }
-
-    is_fy = quarter_label.startswith("FY-")
     unit = detect_unit_multiplier(soup)
 
     for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if len(rows) < 5:
+        if len(table.find_all("tr")) < 5:
             continue
-
-        # Check if this looks like a full income statement (needs revenues + COGS)
         full_text = table.get_text(" ")
-        if not ("Total revenues" in full_text or "Total Revenues" in full_text):
+        if not re.search(r"total\s+revenues?", full_text, re.I):
             continue
-        if "Automotive" not in full_text and "automotive" not in full_text:
+        if not re.search(r"automotive", full_text, re.I):
             continue
         if not re.search(r"cost\s+of\s+revenues?", full_text, re.I):
-            continue  # skip segment-revenue-only tables
+            continue  # skip segment-revenue-only tables (seen in 10-K)
 
-        # Determine column structure from header rows
-        # Format: [label] [Q_current] [Q_prior] [YTD_current] [YTD_prior]  (for 10-Q)
-        #         [label] [FY_current] [FY_prior] [FY_prior2]                (for 10-K)
-        header_texts = []
-        for row in rows[:6]:
-            cells = row.find_all(["td", "th"])
-            cell_texts = [c.get_text(" ", strip=True) for c in cells]
-            combined = " ".join(cell_texts)
-            if any(k in combined for k in ["Three Months", "Six Months", "Nine Months", "Year Ended", "Fiscal Year"]):
-                header_texts = cell_texts
-                break
-
-        # target_col is passed in by caller:
-        #   1 = first data col (Q standalone for 10-Q; FY current for 10-K)
-        #   3 = Nine Months YTD (Q3 10-Q only)
-        def extract_val(cells: list, col: int) -> int | None:
-            numeric_cols = [
+        def extract_val(cells):
+            # Require at least one digit — excludes lone ")" cells from split parens
+            numeric = [
                 c for c in cells[1:]
-                if re.sub(r"[^\d()\-]", "", c.get_text(strip=True))
+                if re.search(r"\d", c.get_text(strip=True))
             ]
-            if col - 1 < len(numeric_cols):
-                raw = numeric_cols[col - 1].get_text(strip=True)
-                # Handle negatives in parens
+            if target_col - 1 < len(numeric):
+                raw = numeric[target_col - 1].get_text(strip=True)
                 raw = raw.replace("(", "-").replace(")", "")
                 raw = re.sub(r"[^\d.\-]", "", raw)
                 try:
@@ -145,45 +130,65 @@ def parse_income_statement(soup: BeautifulSoup, quarter_label: str, target_col: 
                     return None
             return None
 
-        # Extract values
         result = {}
         in_cogs = False
-        prev_label = ""
 
-        for row in rows:
+        for row in table.find_all("tr"):
             cells = row.find_all(["td", "th"])
             if not cells:
                 continue
-            label = cells[0].get_text(" ", strip=True).strip()
-            label_clean = re.sub(r"\s+", " ", label)
+            label = re.sub(r"\s+", " ", cells[0].get_text(" ", strip=True))
 
-            # Track whether we're in the COGS section
-            if re.search(r"cost\s+of\s+revenues?", label_clean, re.I):
+            if re.search(r"cost\s+of\s+revenues?", label, re.I):
                 in_cogs = True
 
             for key, pattern in TARGET_ROWS.items():
-                if pattern.search(label_clean):
-                    # Disambiguate same-label rows in revenue vs COGS
-                    if key in ("automotive_sales_cogs", "energy_cogs", "services_cogs"):
-                        if not in_cogs:
-                            continue
-                    if key in ("automotive_sales_rev",):
-                        if in_cogs:
-                            continue
+                if not pattern.search(label):
+                    continue
+                if key in _REV_ONLY and in_cogs:
+                    continue
+                if key in _COGS_ONLY and not in_cogs:
+                    continue
+                val = extract_val(cells)
+                if val is not None and key not in result:
+                    result[key] = val
 
-                    val = extract_val(cells, target_col)
-                    if val is not None and key not in result:
-                        result[key] = val
+        if not result.get("total_revenues"):
+            continue
 
-        if result.get("total_revenues"):
-            return result
+        # Apply era aliases: map pre-2017 labels to canonical field names
+        # 2015-2016: "Automotive" → total_automotive_rev/cogs
+        if result.get("total_automotive_rev") is None:
+            result["total_automotive_rev"] = result.get("_auto_era_rev")
+        if result.get("total_automotive_cogs") is None:
+            result["total_automotive_cogs"] = result.get("_auto_era_cogs")
+        # 2010-2014: "Automotive sales" (no total line) → use as total_automotive_rev
+        if result.get("total_automotive_rev") is None:
+            result["total_automotive_rev"] = result.get("automotive_sales_rev")
+        if result.get("total_automotive_cogs") is None:
+            result["total_automotive_cogs"] = result.get("automotive_sales_cogs")
+        # 2010-2014: "Development services" → services_rev/cogs
+        if result.get("services_rev") is None:
+            result["services_rev"] = result.get("_dev_svc_rev")
+        if result.get("services_cogs") is None:
+            result["services_cogs"] = result.get("_dev_svc_cogs")
+
+        return result
 
     return None
 
-# ── Main extraction ───────────────────────────────────────────────────────────
+# ── Record builder ─────────────────────────────────────────────────────────────
 
-def _parse_filing(fpath, quarter_label, period_end, col):
-    """Parse one filing at the given column. Returns a record dict or None."""
+_FIELDS = [
+    "automotive_sales_rev", "automotive_credits_rev", "automotive_leasing_rev",
+    "total_automotive_rev", "energy_rev", "services_rev", "total_revenues",
+    "automotive_sales_cogs", "total_automotive_cogs", "energy_cogs",
+    "services_cogs", "total_cogs",
+    "gross_profit", "r_and_d", "sga", "op_income", "net_income",
+]
+
+
+def _parse_filing(fpath: Path, quarter_label: str, period_end: str, col: int) -> dict | None:
     try:
         html = fpath.read_text(encoding="utf-8", errors="ignore")
         soup = BeautifulSoup(html, "html.parser")
@@ -191,66 +196,42 @@ def _parse_filing(fpath, quarter_label, period_end, col):
         print(f"READ ERROR: {e}")
         return None
 
-    data = parse_income_statement(soup, quarter_label, target_col=col)
+    data = parse_income_statement(soup, target_col=col)
     if not data:
         return None
 
-    return {
-        "quarter":                 quarter_label,
-        "period_end":              period_end,
-        "automotive_sales_rev":    data.get("automotive_sales_rev"),
-        "automotive_credits_rev":  data.get("automotive_credits_rev"),
-        "automotive_leasing_rev":  data.get("automotive_leasing_rev"),
-        "total_automotive_rev":    data.get("total_automotive_rev"),
-        "energy_rev":              data.get("energy_rev"),
-        "services_rev":            data.get("services_rev"),
-        "total_revenues":          data.get("total_revenues"),
-        "automotive_sales_cogs":   data.get("automotive_sales_cogs"),
-        "total_automotive_cogs":   data.get("total_automotive_cogs"),
-        "energy_cogs":             data.get("energy_cogs"),
-        "services_cogs":           data.get("services_cogs"),
-        "total_cogs":              data.get("total_cogs"),
-        "gross_profit":            data.get("gross_profit"),
-        "r_and_d":                 data.get("r_and_d"),
-        "sga":                     data.get("sga"),
-        "op_income":               data.get("op_income"),
-        "net_income":              data.get("net_income"),
-        "source":                  "10-Q" if "10-Q" in fpath.name else "10-K",
+    rec = {
+        "quarter":    quarter_label,
+        "period_end": period_end,
+        "source":     "10-Q" if "10-Q" in fpath.name else "10-K",
     }
+    for f in _FIELDS:
+        rec[f] = data.get(f)
+    return rec
 
 
 def _subtract_records(fy: dict, ytd9m: dict, year: int) -> dict:
     """Derive Q4 = FY - 9M YTD for every numeric field."""
-    FIELDS = [
-        "automotive_sales_rev", "automotive_credits_rev", "automotive_leasing_rev",
-        "total_automotive_rev", "energy_rev", "services_rev", "total_revenues",
-        "automotive_sales_cogs", "total_automotive_cogs", "energy_cogs",
-        "services_cogs", "total_cogs", "gross_profit", "r_and_d", "sga",
-        "op_income", "net_income",
-    ]
-    result = {
+    rec = {
         "quarter":    f"Q4-{year}",
         "period_end": f"{year}-12-31",
         "source":     "derived (10-K minus 9M)",
     }
-    for f in FIELDS:
+    for f in _FIELDS:
         a, b = fy.get(f), ytd9m.get(f)
-        result[f] = (a - b) if (a is not None and b is not None) else None
-    return result
+        rec[f] = (a - b) if (a is not None and b is not None) else None
+    return rec
 
+# ── Main extraction ────────────────────────────────────────────────────────────
 
 def extract_all() -> list[dict]:
-    # ── Step 1: Q1/Q2/Q3 from 10-Qs (2023+, col 1 = three-month standalone) ──
-    q_filings = [
-        f for f in sorted(FILINGS_DIR.glob("TSLA-10-Q-*.htm"))
-        if int(f.name.split("-")[3]) >= 2023
-    ]
+    records     = []
+    seen        = set()
+    ytd9m_by_year = {}
+    fy_by_year    = {}
 
-    records = []
-    seen = set()
-    ytd9m_by_year = {}   # year → 9M YTD record (from Q3 10-Q col 3)
-
-    for fpath in q_filings:
+    # ── Step 1: Q1 / Q2 / Q3 from all 10-Qs ──────────────────────────────────
+    for fpath in sorted(FILINGS_DIR.glob("TSLA-10-Q-*.htm")):
         mapping = filename_to_quarter(fpath.name)
         if not mapping:
             continue
@@ -269,8 +250,8 @@ def extract_all() -> list[dict]:
             else:
                 print("SKIP (table not found)")
 
-        # Q3 10-Q (Oct-Nov filing) → also grab Nine Months YTD (col 3)
-        if filing_month in (10, 11) and quarter_label not in seen or filing_month in (10, 11):
+        # Q3 10-Q → also extract Nine Months YTD (col 3) for Q4 derivation
+        if filing_month in (10, 11):
             year = int(quarter_label.split("-")[1])
             if year not in ytd9m_by_year:
                 print(f"  9M-{year}  ({fpath.name})", end="  ")
@@ -282,20 +263,15 @@ def extract_all() -> list[dict]:
                 else:
                     print("SKIP")
 
-    # ── Step 2: FY totals from 10-K (2024+ files → FY 2023+) ──────────────────
-    k_filings = [
-        f for f in sorted(FILINGS_DIR.glob("TSLA-10-K-*.htm"))
-        if int(f.stem.split("-")[3]) >= 2024   # filing year 2024 → FY2023
-    ]
-
-    fy_by_year = {}  # fiscal year → FY record
-
-    for fpath in k_filings:
+    # ── Step 2: FY totals from all 10-Ks ─────────────────────────────────────
+    for fpath in sorted(FILINGS_DIR.glob("TSLA-10-K-*.htm")):
         mapping = filename_to_quarter(fpath.name)
         if not mapping:
             continue
-        fy_label, period_end = mapping   # e.g. "FY-2024"
+        fy_label, period_end = mapping
         fy_year = int(fy_label.split("-")[1])
+        if fy_year < 2010:
+            continue  # no useful segment data before 2010
 
         print(f"  {fy_label}  ({fpath.name})", end="  ")
         rec = _parse_filing(fpath, fy_label, period_end, col=1)
@@ -307,67 +283,69 @@ def extract_all() -> list[dict]:
             print("SKIP")
 
     # ── Step 3: Derive Q4 = FY − 9M YTD ──────────────────────────────────────
-    for year, fy_rec in fy_by_year.items():
+    for year, fy_rec in sorted(fy_by_year.items()):
+        q4_label = f"Q4-{year}"
+        if q4_label in seen:
+            continue
         if year in ytd9m_by_year:
-            q4_label = f"Q4-{year}"
-            if q4_label not in seen:
-                q4 = _subtract_records(fy_rec, ytd9m_by_year[year], year)
-                rev = q4.get("total_revenues")
-                print(f"  Q4-{year}  (derived)  rev=${rev/1e6:.0f}M" if rev else f"  Q4-{year} derived")
-                records.append(q4)
-                seen.add(q4_label)
+            q4 = _subtract_records(fy_rec, ytd9m_by_year[year], year)
+            rev = q4.get("total_revenues")
+            print(f"  {q4_label}  (derived)  rev=${rev/1e6:.0f}M" if rev else f"  {q4_label} derived (no rev)")
+            records.append(q4)
+            seen.add(q4_label)
         else:
-            print(f"  Q4-{year}: skipped — no 9M YTD found")
+            print(f"  {q4_label}: skipped — no 9M YTD")
 
     # ── Sort newest first ──────────────────────────────────────────────────────
     def sort_key(r):
-        q = r["quarter"]
-        m = re.match(r"Q(\d)-(\d{4})", q)
+        m = re.match(r"Q(\d)-(\d{4})", r["quarter"])
         return (int(m.group(2)), int(m.group(1))) if m else (0, 0)
 
     records.sort(key=sort_key, reverse=True)
     return records
 
-# ── Write to data.js ──────────────────────────────────────────────────────────
+# ── Write to data.js ───────────────────────────────────────────────────────────
 
 def update_data_js(records: list):
-    text = DATA_JS.read_text(encoding="utf-8")
+    text     = DATA_JS.read_text(encoding="utf-8")
     json_str = json.dumps(records, indent=4)
     new_block = f"  segments: {json_str},"
 
-    # Match segments: [ ... ], including possibly multi-line empty array
-    pattern = r"segments:\s*\[.*?\],"
+    pattern  = r"segments:\s*\[.*?\],"
     new_text = re.sub(pattern, new_block.lstrip(), text, flags=re.DOTALL, count=1)
 
     if new_text == text:
-        print("  WARNING: segments array not found in data.js — writing fallback JSON")
         out = SCRIPT_DIR.parent / "extracted_segments.json"
         out.write_text(json.dumps(records, indent=2), encoding="utf-8")
-        print(f"  Written to: {out}")
+        print(f"  WARNING: regex replace failed — written to {out}")
         return
 
     DATA_JS.write_text(new_text, encoding="utf-8")
     print(f"\n  data.js updated — {len(records)} segment records written.")
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
-    print("Extracting Tesla segment revenue from 10-Q/10-K filings...")
+    print("Extracting Tesla segment revenue from all 10-Q/10-K filings...\n")
     records = extract_all()
 
     if not records:
         print("No records extracted.")
         return
 
-    print(f"\nSample (newest 5):")
+    print(f"\n{len(records)} total records. Sample (newest 5):")
     for r in records[:5]:
-        rev = r["total_revenues"]
-        gp  = r["gross_profit"]
-        auto = r["total_automotive_rev"]
-        energy = r["energy_rev"]
-        print(f"  {r['quarter']:<8}  Rev=${rev/1e9:.2f}B  GP=${gp/1e9:.2f}B  Auto=${auto/1e9:.2f}B  Energy=${energy/1e9:.2f}B"
-              if all(v is not None for v in [rev, gp, auto, energy])
-              else f"  {r['quarter']:<8}  Rev={rev}  GP={gp}")
+        rev   = r.get("total_revenues")
+        gp    = r.get("gross_profit")
+        auto  = r.get("total_automotive_rev")
+        energy= r.get("energy_rev")
+        if all(v is not None for v in [rev, gp, auto, energy]):
+            print(f"  {r['quarter']:<8}  Rev=${rev/1e9:.2f}B  GP=${gp/1e9:.2f}B  "
+                  f"Auto=${auto/1e9:.2f}B  Energy=${energy/1e9:.2f}B  [{r['source']}]")
+        elif rev and gp:
+            print(f"  {r['quarter']:<8}  Rev=${rev/1e9:.2f}B  GP=${gp/1e9:.2f}B  [{r['source']}]")
+        else:
+            print(f"  {r['quarter']:<8}  Rev={rev}  [{r['source']}]")
 
     update_data_js(records)
     print("Done.")
