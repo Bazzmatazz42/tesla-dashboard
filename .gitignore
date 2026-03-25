@@ -1,0 +1,5 @@
+company_docs/
+__pycache__/
+*.pyc
+scraper/__pycache__/
+extracted_segments.json

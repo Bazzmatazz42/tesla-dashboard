@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tesla Intelligence Dashboard</title>
+
+  <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin></script>
+  <script src="https://unpkg.com/recharts@2.1.16/umd/Recharts.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0A0A0A;
+      color: #F0F0F0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #111318; }
+    ::-webkit-scrollbar-thumb { background: #2A2D35; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3A3D45; }
+
+    a { color: inherit; text-decoration: none; }
+
+    input, select, button {
+      font-family: inherit;
+      font-size: inherit;
+    }
+
+    table { border-collapse: collapse; width: 100%; }
+
+    th {
+      text-align: left;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #6B7280;
+      padding: 10px 14px;
+      border-bottom: 1px solid #252830;
+      white-space: nowrap;
+    }
+
+    td {
+      padding: 10px 14px;
+      border-bottom: 1px solid #1A1D24;
+      color: #D1D5DB;
+      font-size: 13px;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Load data before the app -->
+  <script src="data.js"></script>
+  <script src="docs_index.js"></script>
+
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
