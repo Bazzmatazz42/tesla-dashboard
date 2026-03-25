@@ -1737,10 +1737,255 @@ function TabSources() {
 // MAIN APP
 // ════════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════════
+// TAB: MWh Lens
+// ════════════════════════════════════════════════════════════════════════════
+
+function TabMWh() {
+  const raw = (DATA.mwh_capacity || []).slice().reverse(); // oldest first for charts
+  const [periods, setPeriods] = useState(raw.length);
+
+  if (!raw.length) {
+    return (
+      <Card>
+        <EmptyState icon="⊡" title="No MWh data" subtitle="Run scraper/extract_mwh.py to populate MWh capacity data." />
+      </Card>
+    );
+  }
+
+  const chartData = raw.slice(raw.length - periods);
+  const latest    = raw[raw.length - 1];
+  const prev      = raw[raw.length - 2];
+
+  const mwhChg = latest && prev && prev.total_mwh
+    ? ((latest.total_mwh - prev.total_mwh) / prev.total_mwh) * 100
+    : null;
+  const ratioChg = latest && prev && prev.mwh_price_ratio
+    ? ((latest.mwh_price_ratio - prev.mwh_price_ratio) / prev.mwh_price_ratio) * 100
+    : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+      {/* Explainer */}
+      <Card style={{ padding: "14px 20px", background: C.surface2, borderColor: C.accentSoft }}>
+        <div style={{ fontSize: 13, color: C.textMuted, lineHeight: 1.7 }}>
+          <strong style={{ color: C.text }}>MWh Lens:</strong>{" "}
+          Battery capacity (MWh/yr) is Tesla's shared constraint across all products.
+          Converting every factory's output to MWh reveals product mix shifts that unit
+          volumes hide — e.g. throttling Model 3 to grow Megapack shows up as total MWh
+          growth even if auto deliveries dip. The MWh:Price ratio tracks how much capacity
+          the market is pricing per MWh of annual build rate.
+        </div>
+      </Card>
+
+      {/* KPI strip */}
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        <KpiCard
+          label={`Total MWh (${latest?.quarter})`}
+          value={latest?.total_mwh ? `${(latest.total_mwh / 1000).toFixed(1)} GWh` : "—"}
+          sub="annual capacity installed"
+          change={mwhChg}
+        />
+        <KpiCard
+          label="MWh : Price"
+          value={latest?.mwh_price_ratio ? latest.mwh_price_ratio.toFixed(0) : "—"}
+          sub={`MWh per $1 of stock  (${latest?.quarter})`}
+          change={ratioChg}
+        />
+        <KpiCard
+          label="Stock Price"
+          value={latest?.tsla_price ? `$${latest.tsla_price.toFixed(2)}` : "—"}
+          sub={`TSLA close  (${latest?.quarter})`}
+        />
+        <KpiCard
+          label="Auto MWh"
+          value={latest?.auto_mwh ? `${(latest.auto_mwh / 1000).toFixed(1)} GWh` : "—"}
+          sub="vehicle capacity only"
+        />
+        <KpiCard
+          label="Energy Storage"
+          value={latest?.energy_storage_mwh ? `${(latest.energy_storage_mwh / 1000).toFixed(1)} GWh` : "—"}
+          sub="Megapack + Powerwall"
+        />
+      </div>
+
+      {/* Period selector */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontSize: 11, color: C.textDim }}>Show:</span>
+        {[8, 12, 16, raw.length].map(n => (
+          <button key={n} onClick={() => setPeriods(n)} style={{
+            padding: "3px 10px", borderRadius: 4, fontSize: 11,
+            border: `1px solid ${periods === n ? C.accent : C.border}`,
+            background: periods === n ? C.accentSoft : "transparent",
+            color: periods === n ? C.accent : C.textMuted, cursor: "pointer",
+          }}>{n === raw.length ? "All" : `${n}Q`}</button>
+        ))}
+      </div>
+
+      {/* Chart 1: MWh capacity stack + stock price */}
+      <Card>
+        <SectionTitle>MWh Capacity vs Stock Price</SectionTitle>
+        <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12 }}>
+          Bars = total MWh/yr capacity (left axis).  Line = TSLA stock price (right axis).
+        </div>
+        <ResponsiveContainer width="100%" height={280}>
+          <ComposedChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+            <XAxis dataKey="quarter" tick={{ fill: C.textDim, fontSize: 10 }} />
+            <YAxis yAxisId="mwh" tick={{ fill: C.textDim, fontSize: 10 }}
+              tickFormatter={v => `${(v/1000).toFixed(0)}k`}
+              label={{ value: "MWh/yr (000s)", angle: -90, position: "insideLeft",
+                       fill: C.textDim, fontSize: 10, dx: -8 }} />
+            <YAxis yAxisId="price" orientation="right" tick={{ fill: C.textDim, fontSize: 10 }}
+              tickFormatter={v => `$${v}`}
+              label={{ value: "TSLA $", angle: 90, position: "insideRight",
+                       fill: C.textDim, fontSize: 10, dx: 8 }} />
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                return (
+                  <div style={{ background: C.surface2, border: `1px solid ${C.border}`,
+                    borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+                    <div style={{ color: C.textMuted, marginBottom: 6, fontWeight: 600 }}>{label}</div>
+                    {payload.map((p, i) => (
+                      <div key={i} style={{ color: p.color, marginBottom: 2 }}>
+                        {p.name}: {p.name === "TSLA $" ? `$${p.value?.toFixed(2)}` : `${p.value?.toLocaleString()} MWh`}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11, color: C.textMuted }} />
+            <Bar yAxisId="mwh" dataKey="auto_mwh"          name="Auto MWh"    fill={C.chart[0]} stackId="m" />
+            <Bar yAxisId="mwh" dataKey="energy_storage_mwh" name="Energy MWh" fill={C.chart[2]} stackId="m" />
+            <Line yAxisId="price" dataKey="tsla_price" name="TSLA $"
+              stroke={C.accent} strokeWidth={2} dot={{ r: 3, fill: C.accent }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </Card>
+
+      {/* Chart 2: MWh:Price ratio */}
+      <Card>
+        <SectionTitle>MWh : Price Ratio</SectionTitle>
+        <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12 }}>
+          MWh of annual capacity per $1 of stock price. Higher = more capacity per dollar
+          (market underpricing capacity build-out). Lower = market paying more per MWh.
+        </div>
+        <ResponsiveContainer width="100%" height={220}>
+          <ComposedChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+            <XAxis dataKey="quarter" tick={{ fill: C.textDim, fontSize: 10 }} />
+            <YAxis tick={{ fill: C.textDim, fontSize: 10 }} tickFormatter={v => v.toFixed(0)} />
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                const d = payload[0];
+                return (
+                  <div style={{ background: C.surface2, border: `1px solid ${C.border}`,
+                    borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+                    <div style={{ color: C.textMuted, marginBottom: 4, fontWeight: 600 }}>{label}</div>
+                    <div style={{ color: C.accent }}>MWh:Price = {d.value?.toFixed(1)}</div>
+                  </div>
+                );
+              }}
+            />
+            <Bar dataKey="mwh_price_ratio" name="MWh:Price" fill={C.chart[3]} radius={[3, 3, 0, 0]} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </Card>
+
+      {/* Chart 3: Product mix breakdown */}
+      <Card>
+        <SectionTitle>MWh Capacity — Product Mix</SectionTitle>
+        <div style={{ fontSize: 11, color: C.textDim, marginBottom: 12 }}>
+          How the MWh build rate is distributed across products over time.
+        </div>
+        <ResponsiveContainer width="100%" height={240}>
+          <BarChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} vertical={false} />
+            <XAxis dataKey="quarter" tick={{ fill: C.textDim, fontSize: 10 }} />
+            <YAxis tick={{ fill: C.textDim, fontSize: 10 }}
+              tickFormatter={v => `${(v/1000).toFixed(0)}k`} />
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                return (
+                  <div style={{ background: C.surface2, border: `1px solid ${C.border}`,
+                    borderRadius: 8, padding: "10px 14px", fontSize: 12 }}>
+                    <div style={{ color: C.textMuted, marginBottom: 6, fontWeight: 600 }}>{label}</div>
+                    {payload.map((p, i) => p.value ? (
+                      <div key={i} style={{ color: p.color, marginBottom: 2 }}>
+                        {p.name}: {p.value.toLocaleString()} MWh
+                      </div>
+                    ) : null)}
+                  </div>
+                );
+              }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11, color: C.textMuted }} />
+            <Bar dataKey="model_sx_mwh"        name="Model S/X"    fill={C.chart[0]} stackId="p" />
+            <Bar dataKey="model3_mwh"          name="Model 3"      fill={C.chart[1]} stackId="p" />
+            <Bar dataKey="modely_mwh"          name="Model Y"      fill={C.chart[4]} stackId="p" />
+            <Bar dataKey="cybertruck_mwh"      name="Cybertruck"   fill={C.chart[3]} stackId="p" />
+            <Bar dataKey="energy_storage_mwh"  name="Energy"       fill={C.chart[2]} stackId="p" />
+          </BarChart>
+        </ResponsiveContainer>
+      </Card>
+
+      {/* Data table */}
+      <Card style={{ padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px 10px", borderBottom: `1px solid ${C.border}` }}>
+          <SectionTitle>MWh Capacity by Quarter</SectionTitle>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Quarter</th>
+                <th style={{ textAlign: "right" }}>Total MWh</th>
+                <th style={{ textAlign: "right" }}>Auto MWh</th>
+                <th style={{ textAlign: "right" }}>Energy MWh</th>
+                <th style={{ textAlign: "right" }}>TSLA $</th>
+                <th style={{ textAlign: "right" }}>MWh:Price</th>
+                <th style={{ textAlign: "right" }}>MWh Δ QoQ</th>
+                <th style={{ textAlign: "right" }}>Price Δ QoQ</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...(DATA.mwh_capacity || [])].map(r => (
+                <tr key={r.quarter}>
+                  <td style={{ fontWeight: 600, color: C.text }}>{r.quarter}</td>
+                  <td style={{ textAlign: "right" }}>{r.total_mwh ? r.total_mwh.toLocaleString() : "—"}</td>
+                  <td style={{ textAlign: "right", color: C.textMuted }}>{r.auto_mwh ? r.auto_mwh.toLocaleString() : "—"}</td>
+                  <td style={{ textAlign: "right", color: C.textMuted }}>{r.energy_storage_mwh ? r.energy_storage_mwh.toLocaleString() : "—"}</td>
+                  <td style={{ textAlign: "right" }}>{r.tsla_price ? `$${r.tsla_price.toFixed(2)}` : "—"}</td>
+                  <td style={{ textAlign: "right", fontWeight: 600, color: C.accent }}>{r.mwh_price_ratio ? r.mwh_price_ratio.toFixed(0) : "—"}</td>
+                  <td style={{ textAlign: "right", color: r.qoq_capacity_growth > 0 ? C.positive : r.qoq_capacity_growth < 0 ? C.negative : C.textDim }}>
+                    {r.qoq_capacity_growth != null ? `${(r.qoq_capacity_growth * 100).toFixed(1)}%` : "—"}
+                  </td>
+                  <td style={{ textAlign: "right", color: r.qoq_price_growth > 0 ? C.positive : r.qoq_price_growth < 0 ? C.negative : C.textDim }}>
+                    {r.qoq_price_growth != null ? `${(r.qoq_price_growth * 100).toFixed(1)}%` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+
 const TABS = [
   { id: "overview",    label: "Overview" },
   { id: "financials",  label: "Financials" },
   { id: "operations",  label: "Operations" },
+  { id: "mwh",         label: "MWh Lens" },
   { id: "products",    label: "Products" },
   { id: "docs",        label: "Docs" },
   { id: "feed",        label: "Feed" },
@@ -1756,6 +2001,7 @@ function App() {
       case "overview":   return <TabOverview />;
       case "financials": return <TabFinancials />;
       case "operations": return <TabOperations />;
+      case "mwh":        return <TabMWh />;
       case "products":   return <TabProducts />;
       case "docs":       return <TabDocs />;
       case "feed":       return <TabFeed />;
